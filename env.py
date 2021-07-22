@@ -1,168 +1,154 @@
 import torch
 import numpy as np
 import math
-import itertools
-import matplotlib.pyplot as plt
+from tqdm import tqdm
+import data
+from param import *
+
 
 def get_2city_distance(n1, n2):
-	x1,y1,x2,y2 = n1[0],n1[1],n2[0],n2[1]
-	if isinstance(n1, torch.Tensor):
-		return torch.sqrt((x2-x1).pow(2)+(y2-y1).pow(2))
-	elif isinstance(n1, (list, np.ndarray)):
-		return math.sqrt(pow(x2-x1,2)+pow(y2-y1,2))
-	else:
-		raise TypeError
-	
-class Env_tsp():
-	def __init__(self, cfg):
-		'''
-		nodes(cities) : contains nodes and their 2 dimensional coordinates 
-		[city_t, 2] = [3,2] dimension array e.g. [[0.5,0.7],[0.2,0.3],[0.4,0.1]]
-		'''
-		self.batch = cfg.batch
-		self.city_t = cfg.city_t
-			
-	def get_nodes(self, seed = None):
-		'''
-		return nodes:(city_t,2)
-		'''
-		if seed is not None:
-			torch.manual_seed(seed)
-		device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-		return torch.rand((self.city_t, 2), device = device)
-		
-	def stack_nodes(self):
-		'''
-		nodes:(city_t,2)
-		return inputs:(batch,city_t,2)
-		'''
-		list = [self.get_nodes() for i in range(self.batch)]
-		inputs = torch.stack(list, dim = 0)
-		return inputs
-	
-	def get_batch_nodes(self, n_samples, seed = None):
-		'''
-		return nodes:(batch,city_t,2)
-		'''
-		if seed is not None:
-			torch.manual_seed(seed)
-		device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-		return torch.rand((n_samples, self.city_t, 2), device = device)
-		
-	def stack_random_tours(self):
-		'''
-		tour:(city_t)
-		return tours:(batch,city_t)
-		'''
-		list = [self.get_random_tour() for i in range(self.batch)]
-		tours = torch.stack(list, dim = 0)
-		return tours
-		
-	def stack_l(self, inputs, tours):
-		'''
-		inputs:(batch,city_t,2)
-		tours:(batch,city_t)
-		return l_batch:(batch)
-		'''
-		list = [self.get_tour_distance(inputs[i], tours[i]) for i in range(self.batch)]
-		l_batch = torch.stack(list, dim = 0)
-		return l_batch
+    x1, y1, x2, y2 = n1[0], n1[1], n2[0], n2[1]
+    if isinstance(n1, torch.Tensor):
+        return torch.sqrt((x2 - x1).pow(2) + (y2 - y1).pow(2))
+    elif isinstance(n1, (list, np.ndarray)):
+        return math.sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2))
+    else:
+        raise TypeError
 
-	def stack_l_fast(self, inputs, tours):
-		""" 
-		*** this function is faster version of stack_l! ***
-		inputs: (batch, city_t, 2), Coordinates of nodes
-		tours: (batch, city_t), predicted tour
-		d: (batch, city_t, 2)
-		"""
-		d = torch.gather(input = inputs, dim = 1, index = tours[:,:,None].repeat(1,1,2))
-		return (torch.sum((d[:, 1:] - d[:, :-1]).norm(p = 2, dim = 2), dim = 1)
-				+ (d[:, 0] - d[:, -1]).norm(p = 2, dim = 1))# distance from last node to first selected node)
-	
-	def show(self, nodes, tour):
-		nodes = nodes.cpu().detach()
-		print('distance:{:.3f}'.format(self.get_tour_distance(nodes, tour)))	
-		print(tour)
-		plt.figure()
-		plt.plot(nodes[:,0], nodes[:,1], 'yo', markersize = 16)
-		np_tour = tour[:].cpu().detach()
-		np_fin_tour = [tour[-1].item(), tour[0].item()]
-		plt.plot(nodes[np_tour, 0], nodes[np_tour, 1], 'k-', linewidth = 0.7)
-		plt.plot(nodes[np_fin_tour, 0], nodes[np_fin_tour, 1], 'k-', linewidth = 0.7)
-		for i in range(self.city_t):
-			plt.text(nodes[i,0], nodes[i,1], str(i), size = 10, color = 'b')
-		plt.show()
-	
-	def shuffle(self, inputs):
-		'''
-		shuffle nodes order with a set of xy coordinate
-		inputs:(batch,city_t,2)
-		return shuffle_inputs:(batch,city_t,2)
-		'''
-		shuffle_inputs = torch.zeros(inputs.size())
-		for i in range(self.batch):
-			perm = torch.randperm(self.city_t)
-			shuffle_inputs[i,:,:] = inputs[i,perm,:]
-		return shuffle_inputs
-		
-	def back_tours(self, pred_shuffle_tours, shuffle_inputs, test_inputs, device):
-		'''
-		pred_shuffle_tours:(batch,city_t)
-		shuffle_inputs:(batch,city_t_t,2)
-		test_inputs:(batch,city_t,2)
-		return pred_tours:(batch,city_t)
-		'''
-		pred_tours = []
-		for i in range(self.batch):
-			pred_tour = []
-			for j in range(self.city_t):
-				xy_temp = shuffle_inputs[i, pred_shuffle_tours[i, j]].to(device)
-				for k in range(self.city_t):
-					if torch.all(torch.eq(xy_temp, test_inputs[i,k])):
-						pred_tour.append(torch.tensor(k))
-						if len(pred_tour) == self.city_t:
-							pred_tours.append(torch.stack(pred_tour, dim = 0)) 
-						break
-		pred_tours = torch.stack(pred_tours, dim = 0)
-		return pred_tours 
-			
-	def get_tour_distance(self, nodes, tour):
-		'''
-		nodes:(city_t,2), tour:(city_t)
-		l(= total distance) = l(0-1) + l(1-2) + l(2-3) + ... + l(18-19) + l(19-0) @20%20->0
-		return l:(1)
-		'''
-		l = 0
-		for i in range(self.city_t):
-			l += get_2city_distance(nodes[tour[i]], nodes[tour[(i+1)%self.city_t]])
-		return l
 
-	def get_random_tour(self):
-		'''
-		return tour:(city_t)
-		'''
-		tour = []
-		while set(tour) != set(range(self.city_t)):
-			city = np.random.randint(self.city_t)
-			if city not in tour:
-				tour.append(city)
-		tour = torch.from_numpy(np.array(tour))
-		return tour
-		
-	def get_optimal_tour(self, nodes):
-		# dynamic programming algorithm, calculate lengths between all nodes
-		points = nodes.numpy()
-		all_distances = [[get_2city_distance(x, y) for y in points] for x in points]
-		# initial value - just distance from 0 to every other point + keep the track of edges
-		A = {(frozenset([0, idx + 1]), idx + 1): (dist, [0, idx + 1]) for idx, dist in enumerate(all_distances[0][1:])}
-		cnt = len(points)
-		for m in range(2, cnt):
-			B = {}
-			for S in [frozenset(C) | {0} for C in itertools.combinations(range(1, cnt), m)]:
-				for j in S - {0}:
-					B[(S, j)] = min([(A[(S - {j}, k)][0] + all_distances[k][j], A[(S - {j}, k)][1] + [j]) for k in S if
-									 k != 0 and k != j])  # this will use 0th index of tuple for ordering, the same as if key=itemgetter(0) used
-			A = B
-		res = min([(A[d][0] + all_distances[0][d[1]], A[d][1]) for d in iter(A)])
-		tour = torch.from_numpy(np.array(res[1]))
-		return tour
+class Env:
+    data = None
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    def __init__(self, cfg):
+        '''
+        nodes(cities) : contains nodes and their 2 dimensional coordinates
+        [city_t, 2] = [3,2] dimension array e.g. [[0.5,0.7],[0.2,0.3],[0.4,0.1]]
+        '''
+        self.batch = cfg.batch
+        self.task_n = cfg.task_n
+        self.server_load = cfg.server_load
+        self.alpha = cfg.alphaa
+        self.beta = cfg.beta
+        self.gama = cfg.gama
+
+    def get_nodes(self, seed=None, task_n=100):
+        '''
+        return nodes:(task_n,2)
+        '''
+        if seed is not None:
+            np.random.seed(seed)
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        # Randomly generate (max_length) task
+        multi_param = (15 * task_n) / self.server_load
+        # [CPU, IO, Band, Memory]
+        resource = np.random.rand(task_n, 4) * 2 / self.server_load
+        task_priority = np.random.randint(5, size=(task_n, 1))
+        time_use = np.random.randint(low=10, high=21, size=(task_n, 1))
+        time_out = np.random.randint(low=round(multi_param * 0.8), high=round(multi_param * 1.2),
+                                     size=(task_n, 1))
+        samples = np.concatenate((resource, task_priority, time_out, time_use), axis=-1)
+        samples = torch.tensor(samples, dtype=torch.float32, device=device)
+        return samples
+
+    def get_batch_nodes(self, n_samples):
+        '''
+        return nodes:(batch,task_n,6)
+        '''
+        if Env.data is not None:
+            return Env.data
+        # [n_samples, task_n, 6]
+        samples = []
+        part_samples = []
+        print("start generate data")
+        for _ in tqdm(range(n_samples // 10)):
+            # [task_n, 6]
+            instance = data.get_instance(self.task_n)
+            part_samples.append(instance)
+        for _ in range(10):
+            samples.extend(part_samples)
+        samples = torch.tensor(samples, dtype=torch.float32)
+        print("generate data done")
+        Env.data = samples
+        return samples
+
+    def stack_l_fast(self, inputs, tours):
+        """
+        *** this function is faster version of stack_l! ***
+        inputs: (batch, task_n, 7), Coordinates of nodes
+        tours: (batch, task_n), predicted tour
+        d: (batch, task_n, 7)
+        """
+        inputs_cpu = inputs.cpu()
+        # [batch_size, 6]
+        result_list = []
+        for task_list, idx_list in zip(inputs_cpu, tours):
+            result = self.get_reward(task_list, idx_list)
+            result_list.append(result)
+        result_list = np.array(result_list)
+        batch_reward = result_list[:, 0]
+        return torch.tensor(batch_reward, dtype=torch.float32), np.mean(result_list, axis=0)
+
+    def get_reward(self, task_list, idx_list):
+        task_list = np.array(task_list)
+        self.task_n = len(task_list)
+
+        task_priority_max = 0
+        for i in range(self.task_n):
+            task_priority_max = max(task_priority_max, task_list[i][PRIORITY_IDX])
+        task_priority_sum = 0
+        for idx in range(self.task_n):
+            i = idx_list[idx]
+            task_priority = task_list[i][PRIORITY_IDX]
+            task_priority = (task_priority / task_priority_max) * (1 - idx / self.task_n)
+            task_priority_sum += task_priority
+
+        cpu = 0
+        time_use = 0
+        waiting_time = 0
+        server_run_map = []
+        server_remain = np.array([1, 1, 1])
+        for idx in idx_list:
+            task = task_list[idx]
+            need = task[:RESOURCE_NUM]
+
+            while server_remain[0] < need[0] or server_remain[1] < need[1] or \
+                    server_remain[2] < need[2]:
+                server_run_map = np.array(server_run_map)
+                time_use += 1  # 更新时间
+                cpu += 1 - server_remain[0]
+                server_run_map[:, -1] -= 1
+
+                while len(server_run_map) > 0:  # 移除已完成的任务
+                    min_task_idx = np.argmin(server_run_map, axis=0)[-1]
+                    min_task = server_run_map[min_task_idx]
+                    min_need = min_task[:RESOURCE_NUM]
+                    min_time = min_task[-1]
+                    if min_time > 0:
+                        break
+                    server_remain = np.add(server_remain, min_need)  # 更新剩余容量
+                    server_run_map = np.delete(server_run_map, min_task_idx, axis=0)  # 移除任务
+
+            # 资源充足，直接下放任务
+            if len(server_run_map) == 0:
+                server_run_map = np.array([task])
+            else:
+                server_run_map = np.row_stack((server_run_map, task))
+            waiting_time += task[RELEASE_TIME_IDX] + time_use
+            server_remain = np.subtract(server_remain, need)  # 更新服务器剩余容量
+
+        # 运行完剩余任务
+        while len(server_run_map) > 0:
+            cpu = np.sum(server_run_map, axis=0)[0]
+            server_run_map = np.array(server_run_map)
+            time_use += 1
+            server_run_map[:, TIME_IDX] -= 1
+            # 移除已执行完的任务
+            while len(server_run_map) > 0 and np.min(server_run_map, axis=0)[TIME_IDX] == 0:
+                min_task_idx = np.argmin(server_run_map, axis=0)[TIME_IDX]
+                server_run_map = np.delete(server_run_map, min_task_idx, axis=0)
+
+        cpu = cpu / time_use
+        waiting_time_avg = waiting_time / self.task_n
+        reward = cpu + time_use / self.task_n + task_priority_sum / self.task_n + waiting_time_avg / 50
+        return [reward, cpu, time_use, task_priority_sum, waiting_time_avg]
